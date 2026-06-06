@@ -1,7 +1,8 @@
-# Large submission packages — track only my_submission
-*_submission/
-!my_submission/
 *.zip
+
+# Training data splits and metadata — not model artifacts
+*val_split*.pkl
+ncf_meta*.pkl
 
 # Python
 __pycache__/
