@@ -1,0 +1,21 @@
+name: cs321m
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+    - torch
+    - torch-measure
+    - sentence-transformers
+    - numpy
+    - pandas
+    - matplotlib
+    - scipy
+    - scikit-learn
+    - datasets
+    - huggingface_hub
+    - transformers
+    - seaborn
+    - optuna
+    - tqdm

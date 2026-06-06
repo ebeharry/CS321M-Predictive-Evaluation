@@ -1,0 +1,10 @@
+# Large submission packages — track only my_submission
+*_submission/
+!my_submission/
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
