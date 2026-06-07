@@ -13,7 +13,8 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import log_loss, roc_auc_score
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent.parent
+_val_pkl = ROOT / "amortized_irt_submission" / "val_split.pkl"
 
 results = []
 
@@ -202,6 +203,160 @@ if all((_d / f).exists() for f in ["ncf_head.pt", "ncf_embeddings.pt", "ncf_meta
     results.append(report("NCF", preds, lbl))
 else:
     print("NCF: checkpoint not found, skipping")
+
+# ---------------------------------------------------------------------------
+# AmortizedRasch TF-IDF
+# ---------------------------------------------------------------------------
+
+_d = ROOT / "amortized_rasch_tfidf_submission"
+_val_pkl = ROOT / "amortized_irt_submission" / "val_split.pkl"
+if (_d / "amortized_rasch_tfidf.pt").exists() and _val_pkl.exists():
+    import math, re
+    from torch_measure.models import AmortizedIRT
+
+    split = load_val(_val_pkl)
+    ckpt = torch.load(_d / "amortized_rasch_tfidf.pt", weights_only=True, map_location="cpu")
+    tfidf_data = np.load(_d / "tfidf_arrays.npz", allow_pickle=True)
+    vocab = {w: i for i, w in enumerate(tfidf_data["vocab"])}
+    idf = tfidf_data["idf"].astype("float32")
+    vs, vi, lbl = split["val_s_idx"], split["val_i_idx"], split["val_labels"]
+    items_list = split["items_list"]
+
+    model = AmortizedIRT(
+        n_subjects=ckpt["n_subjects"], n_items=ckpt["n_items"],
+        embedding_dim=ckpt["embedding_dim"], hidden_dim=ckpt["hidden_dim"],
+        n_layers=ckpt["n_layers"], pl=ckpt["pl"],
+    )
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+
+    _tok = re.compile(r"(?u)\b\w\w+\b")
+    def _npz_tfidf(texts):
+        vecs = np.zeros((len(texts), len(idf)), dtype="float32")
+        for r, text in enumerate(texts):
+            counts = {}
+            for t in _tok.findall(text.lower()):
+                idx = vocab.get(t)
+                if idx is not None:
+                    counts[idx] = counts.get(idx, 0) + 1
+            for idx, tf in counts.items():
+                vecs[r, idx] = (1.0 + math.log(tf)) * idf[idx]
+            n = np.linalg.norm(vecs[r])
+            if n > 0:
+                vecs[r] /= n
+        return torch.tensor(vecs)
+
+    print(f"Encoding {len(items_list)} items for AmortizedRasch (TF-IDF)...")
+    all_emb = _npz_tfidf(items_list)
+    with torch.no_grad():
+        b_all = model.item_net(all_emb)[:, 0]
+        preds = torch.sigmoid(model.ability[vs] - b_all[vi]).numpy()
+    results.append(report("AmortizedRasch (TF-IDF)", preds, lbl))
+else:
+    print("AmortizedRasch (TF-IDF): checkpoint not found, skipping")
+
+# ---------------------------------------------------------------------------
+# Amortized3PL TF-IDF
+# ---------------------------------------------------------------------------
+
+_d = ROOT / "amortized_3pl_tfidf_submission"
+if (_d / "amortized_3pl_tfidf.pt").exists() and _val_pkl.exists():
+    from torch_measure.models import AmortizedIRT
+
+    split = load_val(_val_pkl)
+    ckpt = torch.load(_d / "amortized_3pl_tfidf.pt", weights_only=True, map_location="cpu")
+    tfidf_data = np.load(_d / "tfidf_arrays.npz", allow_pickle=True)
+    vocab = {w: i for i, w in enumerate(tfidf_data["vocab"])}
+    idf = tfidf_data["idf"].astype("float32")
+    vs, vi, lbl = split["val_s_idx"], split["val_i_idx"], split["val_labels"]
+    items_list = split["items_list"]
+
+    model = AmortizedIRT(
+        n_subjects=ckpt["n_subjects"], n_items=ckpt["n_items"],
+        embedding_dim=ckpt["embedding_dim"], hidden_dim=ckpt["hidden_dim"],
+        n_layers=ckpt["n_layers"], pl=ckpt["pl"],
+    )
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+
+    print(f"Encoding {len(items_list)} items for Amortized3PL (TF-IDF)...")
+    all_emb = _npz_tfidf(items_list)
+    with torch.no_grad():
+        params = model.item_net(all_emb)
+        b_all, a_all, c_all = params[:, 0], torch.exp(params[:, 1]), torch.sigmoid(params[:, 2])
+        preds = (c_all[vi] + (1 - c_all[vi]) * torch.sigmoid(a_all[vi] * (model.ability[vs] - b_all[vi]))).numpy()
+    results.append(report("Amortized3PL (TF-IDF)", preds, lbl))
+else:
+    print("Amortized3PL (TF-IDF): checkpoint not found, skipping")
+
+# ---------------------------------------------------------------------------
+# Amortized3PL Sentence
+# ---------------------------------------------------------------------------
+
+_d = ROOT / "amortized_3pl_sentence_submission"
+if (_d / "amortized_3pl_sentence.pt").exists() and _val_pkl.exists():
+    from sentence_transformers import SentenceTransformer
+    from torch_measure.models import AmortizedIRT
+
+    split = load_val(_val_pkl)
+    ckpt = torch.load(_d / "amortized_3pl_sentence.pt", weights_only=True, map_location="cpu")
+    vs, vi, lbl = split["val_s_idx"], split["val_i_idx"], split["val_labels"]
+    items_list = split["items_list"]
+
+    model = AmortizedIRT(
+        n_subjects=ckpt["n_subjects"], n_items=ckpt["n_items"],
+        embedding_dim=ckpt["embedding_dim"], hidden_dim=ckpt["hidden_dim"],
+        n_layers=ckpt["n_layers"], pl=ckpt["pl"],
+    )
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+
+    encoder = SentenceTransformer(ckpt["encoder_name"])
+    print(f"Encoding {len(items_list)} items for Amortized3PL (Sentence)...")
+    all_emb = torch.tensor(
+        encoder.encode(items_list, batch_size=256, convert_to_numpy=True).astype("float32")
+    )
+    with torch.no_grad():
+        params = model.item_net(all_emb)
+        b_all, a_all, c_all = params[:, 0], torch.exp(params[:, 1]), torch.sigmoid(params[:, 2])
+        preds = (c_all[vi] + (1 - c_all[vi]) * torch.sigmoid(a_all[vi] * (model.ability[vs] - b_all[vi]))).numpy()
+    results.append(report("Amortized3PL (Sentence)", preds, lbl))
+else:
+    print("Amortized3PL (Sentence): checkpoint not found, skipping")
+
+# ---------------------------------------------------------------------------
+# AmortizedRasch Sentence
+# ---------------------------------------------------------------------------
+
+_d = ROOT / "amortized_irt_rasch_submission"
+if (_d / "amortized_irt_rasch.pt").exists() and _val_pkl.exists():
+    from sentence_transformers import SentenceTransformer
+    from torch_measure.models import AmortizedIRT
+
+    split = load_val(_val_pkl)
+    ckpt = torch.load(_d / "amortized_irt_rasch.pt", weights_only=True, map_location="cpu")
+    vs, vi, lbl = split["val_s_idx"], split["val_i_idx"], split["val_labels"]
+    items_list = split["items_list"]
+
+    model = AmortizedIRT(
+        n_subjects=ckpt["n_subjects"], n_items=ckpt["n_items"],
+        embedding_dim=ckpt["embedding_dim"], hidden_dim=ckpt["hidden_dim"],
+        n_layers=ckpt["n_layers"], pl=ckpt["pl"],
+    )
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+
+    encoder = SentenceTransformer(ckpt["encoder_name"])
+    print(f"Encoding {len(items_list)} items for AmortizedRasch (Sentence)...")
+    all_emb = torch.tensor(
+        encoder.encode(items_list, batch_size=256, convert_to_numpy=True).astype("float32")
+    )
+    with torch.no_grad():
+        b_all = model.item_net(all_emb)[:, 0]
+        preds = torch.sigmoid(model.ability[vs] - b_all[vi]).numpy()
+    results.append(report("AmortizedRasch (Sentence)", preds, lbl))
+else:
+    print("AmortizedRasch (Sentence): checkpoint not found, skipping")
 
 # ---------------------------------------------------------------------------
 # Summary
